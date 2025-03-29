@@ -21,9 +21,10 @@ load_dotenv()
 app = Flask(__name__)
 CORS(app, resources={
     r"/*": {
-        "origins": ["http://localhost:3000", "http://127.0.0.1:3000"],
+        "origins": ["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:5000", "http://127.0.0.1:5000"],
         "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-        "allow_headers": ["Content-Type", "Authorization"]
+        "allow_headers": ["Content-Type", "Authorization"],
+        "supports_credentials": True
     }
 })
 
@@ -228,7 +229,7 @@ def register_face():
         print("Storing features in Firestore")
         user_ref = db.collection("users").document(user_id)
         user_ref.update({
-            "face_features": encrypted_features.decode(),
+            "face_features": encrypted_features,
             "has_face_registered": True,
             "face_registration_date": datetime.now().isoformat()
         })
@@ -239,9 +240,7 @@ def register_face():
         
         # Verify the stored features can be retrieved and decrypted
         try:
-            stored_features_base64 = updated_user["face_features"]
-            stored_features_bytes = base64.b64decode(stored_features_base64)
-            stored_features = decrypt_face_features(stored_features_bytes)
+            stored_features = decrypt_face_features(base64.b64decode(encrypted_features))
             print(f"Verified stored features shape: {stored_features.shape}")  # Debug log
             print(f"Verified stored features range: [{np.min(stored_features)}, {np.max(stored_features)}]")  # Debug log
         except Exception as e:
@@ -507,9 +506,7 @@ def match_face():
                 
                 try:
                     # Decode base64 and decrypt stored features
-                    stored_features_base64 = user_data["face_features"]
-                    stored_features_bytes = base64.b64decode(stored_features_base64)
-                    stored_features = decrypt_face_features(stored_features_bytes)
+                    stored_features = decrypt_face_features(base64.b64decode(user_data["face_features"]))
                     
                     print(f"Successfully decrypted features for user {user.id}")  # Debug log
                     print(f"Stored features shape: {stored_features.shape}")  # Debug log
@@ -700,15 +697,18 @@ def encrypt_face_features(features):
         # Encrypt
         encrypted = cipher.encrypt(serialized.encode())
         
-        # Ensure proper base64 encoding
-        encrypted_base64 = base64.b64encode(encrypted)
+        # Convert to base64 string
+        encrypted_base64 = base64.b64encode(encrypted).decode('utf-8')
         
         # Verify encryption
         try:
-            decrypted = cipher.decrypt(encrypted)
+            # Decode base64 back to bytes
+            encrypted_bytes = base64.b64decode(encrypted_base64)
+            # Decrypt
+            decrypted = cipher.decrypt(encrypted_bytes)
             decrypted_features = np.array(json.loads(decrypted.decode()))
-            print(f"Decrypted features shape: {decrypted_features.shape}")  # Debug log
-            print(f"Decrypted features range: [{np.min(decrypted_features)}, {np.max(decrypted_features)}]")  # Debug log
+            print(f"Verification successful - Decrypted features shape: {decrypted_features.shape}")  # Debug log
+            print(f"Verification successful - Decrypted features range: [{np.min(decrypted_features)}, {np.max(decrypted_features)}]")  # Debug log
         except Exception as e:
             print(f"Verification error: {str(e)}")  # Debug log
             raise
@@ -722,6 +722,10 @@ def decrypt_face_features(encrypted_features):
     """Decrypt feature array."""
     try:
         print("Decrypting features...")  # Debug log
+        
+        # If input is a string (base64), decode it first
+        if isinstance(encrypted_features, str):
+            encrypted_features = base64.b64decode(encrypted_features)
         
         # Ensure proper padding for base64
         padding = 4 - (len(encrypted_features) % 4)
@@ -738,6 +742,9 @@ def decrypt_face_features(encrypted_features):
         return features
     except Exception as e:
         print(f"Decryption error: {str(e)}")  # Debug log
+        print(f"Error type: {type(e)}")  # Debug log
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")  # Debug log
         raise
 
 # ==============================
@@ -758,13 +765,17 @@ def verify_firebase_token(token):
     """Verify Firebase ID token."""
     try:
         # Remove 'Bearer ' prefix if present
-        if token.startswith('Bearer '):
-            token = token.split(' ')[1]
-        
-        # Verify the token
-        decoded_token = auth.verify_id_token(token)
-        print(f"Token verified successfully for user: {decoded_token['uid']}")  # Debug log
-        return decoded_token
+        if token and isinstance(token, str):
+            if token.startswith('Bearer '):
+                token = token.split(' ')[1]
+            
+            # Verify the token
+            decoded_token = auth.verify_id_token(token)
+            print(f"Token verified successfully for user: {decoded_token['uid']}")  # Debug log
+            return decoded_token
+        else:
+            print("Invalid token format")  # Debug log
+            return None
     except Exception as e:
         print(f"Token verification error: {str(e)}")  # Debug log
         return None
@@ -776,67 +787,100 @@ def optimize_features(features):
 @app.route("/api/security/encrypt", methods=["POST"])
 def encrypt_features_endpoint():
     try:
+        print("Starting encryption process...")  # Debug log
+        
         # Get the token from the Authorization header
         auth_header = request.headers.get('Authorization')
         if not auth_header:
+            print("No authorization header found")  # Debug log
             return jsonify({"error": "No authorization token provided"}), 401
 
         # Verify the Firebase token
-        try:
-            decoded_token = auth.verify_id_token(auth_header)
-            user_id = decoded_token['uid']
-        except Exception as e:
-            print(f"Token verification error: {str(e)}")
+        decoded_token = verify_firebase_token(auth_header)
+        if not decoded_token:
+            print("Token verification failed")  # Debug log
             return jsonify({"error": "Invalid token"}), 401
+
+        user_id = decoded_token['uid']
+        print(f"Processing request for user: {user_id}")  # Debug log
 
         # Get features from request
         data = request.get_json()
-        if not data or 'features' not in data:
+        if not data:
+            print("No JSON data in request")  # Debug log
+            return jsonify({"error": "No data provided"}), 400
+            
+        if 'features' not in data:
+            print("No features in request data")  # Debug log
             return jsonify({"error": "No features provided"}), 400
 
+        print(f"Received features array of length: {len(data['features'])}")  # Debug log
         features = np.array(data['features'])
+        print(f"Features shape: {features.shape}")  # Debug log
         
         # Encrypt the features
+        print("Starting feature encryption...")  # Debug log
         encrypted_features = encrypt_face_features(features)
+        print("Features encrypted successfully")  # Debug log
         
-        # Convert to base64 for JSON response
-        encrypted_base64 = base64.b64encode(encrypted_features).decode('utf-8')
-        
+        # Return the encrypted features directly (it's already base64 encoded)
         return jsonify({
             "status": "success",
-            "encrypted_features": encrypted_base64
+            "encrypted_features": encrypted_features
         })
 
     except Exception as e:
-        print(f"Encryption error: {str(e)}")
+        print(f"Encryption error: {str(e)}")  # Debug log
+        print(f"Error type: {type(e)}")  # Debug log
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")  # Debug log
         return jsonify({"error": str(e)}), 500
 
 @app.route("/api/security/decrypt", methods=["POST"])
 def decrypt_features_endpoint():
     try:
+        print("Starting decryption process...")  # Debug log
+        
         # Get the token from the Authorization header
         auth_header = request.headers.get('Authorization')
         if not auth_header:
+            print("No authorization header found")  # Debug log
             return jsonify({"error": "No authorization token provided"}), 401
 
         # Verify the Firebase token
-        try:
-            decoded_token = auth.verify_id_token(auth_header)
-            user_id = decoded_token['uid']
-        except Exception as e:
-            print(f"Token verification error: {str(e)}")
+        decoded_token = verify_firebase_token(auth_header)
+        if not decoded_token:
+            print("Token verification failed")  # Debug log
             return jsonify({"error": "Invalid token"}), 401
+
+        user_id = decoded_token['uid']
+        print(f"Processing request for user: {user_id}")  # Debug log
 
         # Get encrypted features from request
         data = request.get_json()
-        if not data or 'features' not in data:
+        if not data:
+            print("No JSON data in request")  # Debug log
+            return jsonify({"error": "No data provided"}), 400
+            
+        if 'features' not in data:
+            print("No features in request data")  # Debug log
             return jsonify({"error": "No encrypted features provided"}), 400
 
+        print(f"Received encrypted features of length: {len(data['features'])}")  # Debug log
+        
         # Convert base64 back to bytes
-        encrypted_features = base64.b64decode(data['features'])
+        try:
+            encrypted_features = base64.b64decode(data['features'])
+            print("Successfully decoded base64 features")  # Debug log
+        except Exception as e:
+            print(f"Base64 decoding error: {str(e)}")  # Debug log
+            return jsonify({"error": "Invalid base64 encoding"}), 400
         
         # Decrypt the features
+        print("Starting feature decryption...")  # Debug log
         decrypted_features = decrypt_face_features(encrypted_features)
+        print("Features decrypted successfully")  # Debug log
+        print(f"Decrypted features shape: {decrypted_features.shape}")  # Debug log
         
         return jsonify({
             "status": "success",
@@ -844,7 +888,10 @@ def decrypt_features_endpoint():
         })
 
     except Exception as e:
-        print(f"Decryption error: {str(e)}")
+        print(f"Decryption error: {str(e)}")  # Debug log
+        print(f"Error type: {type(e)}")  # Debug log
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")  # Debug log
         return jsonify({"error": str(e)}), 500
 
 # ==============================
