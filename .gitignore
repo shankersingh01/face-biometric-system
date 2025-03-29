@@ -24,6 +24,7 @@ wheels/
 # Virtual Environment
 venv/
 ENV/
+myenv/
 
 # IDE
 .idea/
@@ -35,6 +36,10 @@ ENV/
 .env
 .env.local
 .env.*.local
+
+# Encryption keys
+encryption.key
+*.key
 
 # Firebase
 firebase-service-account.json

@@ -36,8 +36,19 @@ db = firestore.client()
 app.config['JWT_SECRET_KEY'] = 'your-secret-key'  # Change this in production
 jwt = JWTManager(app)
 
-# Encryption Key
-key = Fernet.generate_key()
+# Encryption Key - Make it persistent
+def get_or_create_key():
+    key_file = 'encryption.key'
+    if os.path.exists(key_file):
+        with open(key_file, 'rb') as f:
+            return f.read()
+    else:
+        key = Fernet.generate_key()
+        with open(key_file, 'wb') as f:
+            f.write(key)
+        return key
+
+key = get_or_create_key()
 cipher = Fernet(key)
 
 # Database to store encrypted features and labels
@@ -494,38 +505,44 @@ def match_face():
                     print(f"No face features found for user {user.id}")  # Debug log
                     continue
                 
-                # Decode base64 and decrypt stored features
-                stored_features_base64 = user_data["face_features"]
-                stored_features_bytes = base64.b64decode(stored_features_base64)
-                stored_features = decrypt_face_features(stored_features_bytes)
-                
-                print(f"Stored features shape: {stored_features.shape}")  # Debug log
-                print(f"Stored features range: [{np.min(stored_features)}, {np.max(stored_features)}]")  # Debug log
-                
-                # Ensure features are in the correct format
-                if len(stored_features.shape) == 1:
-                    stored_features = stored_features.reshape(1, -1)
-                if len(input_features.shape) == 1:
-                    input_features = input_features.reshape(1, -1)
-                
-                # Calculate face distance directly
-                face_distance = face_recognition.face_distance(stored_features, input_features)[0]
-                similarity_score = 1 - face_distance  # Convert distance to similarity score
-                
-                print(f"Face distance for user {user.id}: {face_distance}")  # Debug log
-                print(f"Similarity score for user {user.id}: {similarity_score}")  # Debug log
-                
-                all_similarities.append(similarity_score)
-                all_user_ids.append(user.id)
-                
-                if similarity_score > best_confidence:
-                    best_confidence = similarity_score
-                    best_match = {
-                        "user_id": user.id,
-                        "email": user_data.get("email", ""),
-                        "name": user_data.get("name", ""),
-                        "confidence": float(similarity_score)
-                    }
+                try:
+                    # Decode base64 and decrypt stored features
+                    stored_features_base64 = user_data["face_features"]
+                    stored_features_bytes = base64.b64decode(stored_features_base64)
+                    stored_features = decrypt_face_features(stored_features_bytes)
+                    
+                    print(f"Successfully decrypted features for user {user.id}")  # Debug log
+                    print(f"Stored features shape: {stored_features.shape}")  # Debug log
+                    print(f"Stored features range: [{np.min(stored_features)}, {np.max(stored_features)}]")  # Debug log
+                    
+                    # Ensure features are in the correct format
+                    if len(stored_features.shape) == 1:
+                        stored_features = stored_features.reshape(1, -1)
+                    if len(input_features.shape) == 1:
+                        input_features = input_features.reshape(1, -1)
+                    
+                    # Calculate face distance directly
+                    face_distance = face_recognition.face_distance(stored_features, input_features)[0]
+                    similarity_score = 1 - face_distance  # Convert distance to similarity score
+                    
+                    print(f"Face distance for user {user.id}: {face_distance}")  # Debug log
+                    print(f"Similarity score for user {user.id}: {similarity_score}")  # Debug log
+                    
+                    all_similarities.append(float(similarity_score))  # Convert to float
+                    all_user_ids.append(str(user.id))  # Convert to string
+                    
+                    if similarity_score > best_confidence:
+                        best_confidence = similarity_score
+                        best_match = {
+                            "user_id": str(user.id),  # Convert to string
+                            "email": str(user_data.get("email", "")),  # Convert to string
+                            "name": str(user_data.get("name", "")),  # Convert to string
+                            "confidence": float(similarity_score)  # Convert to float
+                        }
+                except Exception as e:
+                    print(f"Error processing features for user {user.id}: {str(e)}")  # Debug log
+                    continue
+                    
             except Exception as e:
                 print(f"Error processing user {user.id}: {str(e)}")  # Debug log
                 continue
@@ -537,22 +554,24 @@ def match_face():
         # Use a more lenient threshold (0.5 instead of 0.6)
         MATCH_THRESHOLD = 0.5
         
-        # Return detailed matching information
-        return jsonify({
-            "match_found": best_confidence >= MATCH_THRESHOLD,
+        # Return detailed matching information with all values converted to JSON-serializable types
+        response_data = {
+            "match_found": bool(best_confidence >= MATCH_THRESHOLD),  # Convert to bool
             "best_match": best_match,
-            "all_similarities": all_similarities,
-            "threshold": MATCH_THRESHOLD,
+            "all_similarities": [float(x) for x in all_similarities],  # Convert to float
+            "threshold": float(MATCH_THRESHOLD),  # Convert to float
             "debug_info": {
-                "input_features_shape": input_features.shape,
+                "input_features_shape": list(input_features.shape),  # Convert to list
                 "input_features_range": [float(np.min(input_features)), float(np.max(input_features))],
-                "number_of_registered_users": len(registered_users),
-                "best_confidence": float(best_confidence) if best_match else 0,
-                "threshold_used": MATCH_THRESHOLD,
-                "all_user_ids": all_user_ids,
-                "all_similarities": all_similarities
+                "number_of_registered_users": int(len(registered_users)),  # Convert to int
+                "best_confidence": float(best_confidence) if best_match else 0.0,  # Convert to float
+                "threshold_used": float(MATCH_THRESHOLD),  # Convert to float
+                "all_user_ids": [str(x) for x in all_user_ids],  # Convert to string
+                "all_similarities": [float(x) for x in all_similarities]  # Convert to float
             }
-        })
+        }
+        
+        return jsonify(response_data)
     
     except Exception as e:
         print(f"Face matching error: {str(e)}")  # Debug log
@@ -681,13 +700,20 @@ def encrypt_face_features(features):
         # Encrypt
         encrypted = cipher.encrypt(serialized.encode())
         
-        # Verify encryption
-        decrypted = cipher.decrypt(encrypted)
-        decrypted_features = np.array(json.loads(decrypted.decode()))
-        print(f"Decrypted features shape: {decrypted_features.shape}")  # Debug log
-        print(f"Decrypted features range: [{np.min(decrypted_features)}, {np.max(decrypted_features)}]")  # Debug log
+        # Ensure proper base64 encoding
+        encrypted_base64 = base64.b64encode(encrypted)
         
-        return encrypted
+        # Verify encryption
+        try:
+            decrypted = cipher.decrypt(encrypted)
+            decrypted_features = np.array(json.loads(decrypted.decode()))
+            print(f"Decrypted features shape: {decrypted_features.shape}")  # Debug log
+            print(f"Decrypted features range: [{np.min(decrypted_features)}, {np.max(decrypted_features)}]")  # Debug log
+        except Exception as e:
+            print(f"Verification error: {str(e)}")  # Debug log
+            raise
+        
+        return encrypted_base64
     except Exception as e:
         print(f"Encryption error: {str(e)}")  # Debug log
         raise
@@ -697,6 +723,11 @@ def decrypt_face_features(encrypted_features):
     try:
         print("Decrypting features...")  # Debug log
         
+        # Ensure proper padding for base64
+        padding = 4 - (len(encrypted_features) % 4)
+        if padding != 4:
+            encrypted_features += b'=' * padding
+            
         # Decrypt
         decrypted = cipher.decrypt(encrypted_features)
         features = np.array(json.loads(decrypted.decode()))
