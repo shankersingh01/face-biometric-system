@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Home</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+</head>
+<body>
+    <div class="sidebar">
+        <h2>Menu</h2>
+        <ul>
+            <li><a href="#" id="registerUser">Register User</a></li>
+            <li><a href="#" id="checkFace">Check Face</a></li>
+            <li><a href="#">Graphs</a></li>
+            <li><a href="#">Performance Stats</a></li>
+            <li><a href="#">Profile</a></li>
+            <li><a href="#">Settings</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h1>Home</h1>
+        <div id="registerSection" class="hidden">
+            <h2>Register User</h2>
+            <input type="file" id="uploadImage" accept="image/*">
+            <button id="registerBtn" class="btn">Register</button>
+            <p id="registerMessage"></p>
+        </div>
+        <div id="checkSection" class="hidden">
+            <h2>Check Face</h2>
+            <input type="file" id="checkImage" accept="image/*">
+            <button id="checkBtn" class="btn">Check</button>
+            <p id="checkMessage"></p>
+        </div>
+    </div>
+    <script src="{{ url_for('static', filename='js/script.js') }}"></script>
+</body>
+</html>
