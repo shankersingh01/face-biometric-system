@@ -14,6 +14,7 @@ import firebase_admin
 from firebase_admin import credentials, auth, firestore
 from dotenv import load_dotenv
 import base64
+from sklearn.metrics.pairwise import cosine_similarity
 
 # Load environment variables
 load_dotenv()
@@ -261,83 +262,113 @@ def register_face():
         return jsonify({"error": str(e)}), 500
 
 @app.route("/api/face/extract", methods=["POST"])
-def extract_features_endpoint():
+def extract_face_features():
     try:
-        # Verify Firebase token
-        token = request.headers.get("Authorization")
-        print(f"Authorization header: {token}")  # Debug log
+        print("Starting face feature extraction...")  # Debug log
         
-        if not token:
-            print("No token provided")  # Debug log
-            return jsonify({"error": "No token provided"}), 401
-        
-        decoded_token = verify_firebase_token(token)
-        print(f"Decoded token: {decoded_token}")  # Debug log
-        
+        # Get the token from the Authorization header
+        auth_header = request.headers.get('Authorization')
+        if not auth_header:
+            print("No authorization header found")  # Debug log
+            return jsonify({"error": "No authorization token provided"}), 401
+
+        # Verify the Firebase token
+        decoded_token = verify_firebase_token(auth_header)
         if not decoded_token:
-            print("Invalid token")  # Debug log
+            print("Token verification failed")  # Debug log
             return jsonify({"error": "Invalid token"}), 401
 
+        user_id = decoded_token['uid']
+        print(f"Processing request for user: {user_id}")  # Debug log
+
+        # Get image from request
         if "image" not in request.files:
             print("No image in request.files")  # Debug log
-            return jsonify({"error": "No image uploaded"}), 400
+            return jsonify({"error": "No image provided"}), 400
 
-        file = request.files["image"]
-        print(f"Image file received: {file.filename}")  # Debug log
-        
-        # Read the file once and store the data
-        image_data = file.read()
-        
-        # Convert to numpy array for both feature extraction and landmark detection
+        image_file = request.files["image"]
+        print(f"Image file received: {image_file.filename}")  # Debug log
+        image_data = image_file.read()
+
+        # Convert image data to numpy array
         nparr = np.frombuffer(image_data, np.uint8)
-        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        
-        if image is None:
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+        if img is None:
             print("Failed to decode image")  # Debug log
             return jsonify({"error": "Failed to decode image"}), 400
-            
-        print(f"Image shape: {image.shape}")  # Debug log
-        
-        # Extract features
-        print("Attempting to extract face features...")  # Debug log
-        features = extract_face_features(image_data)
-        if features is None:
-            print("No face detected in image")  # Debug log
-            return jsonify({"error": "No face detected in image"}), 400
-            
-        print(f"Features extracted successfully. Shape: {features.shape}")  # Debug log
-        
+
+        print(f"Image shape: {img.shape}")  # Debug log
+
+        # Convert to grayscale for face detection
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        print("Converted image to grayscale")  # Debug log
+
+        # Detect faces
+        face_locations = face_recognition.face_locations(gray)
+        if not face_locations:
+            print("No faces detected in image")  # Debug log
+            return jsonify({"error": "No face detected in the image"}), 400
+
+        print(f"Found {len(face_locations)} face(s) in the image")  # Debug log
+
+        # Get face encodings
+        face_encodings = face_recognition.face_encodings(img, face_locations)
+        if not face_encodings:
+            print("Failed to get face encodings")  # Debug log
+            return jsonify({"error": "Failed to extract face features"}), 400
+
         # Get facial landmarks
-        rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        face_landmarks = face_recognition.face_landmarks(rgb_image)
-        
-        if not face_landmarks:
-            print("No face landmarks detected")  # Debug log
-            return jsonify({"error": "No face landmarks detected"}), 400
-        
-        # Draw landmarks on image
-        landmark_image = image.copy()
-        for landmarks in face_landmarks:
-            for facial_features in landmarks.values():
-                for point in facial_features:
-                    cv2.circle(landmark_image, point, 2, (0, 255, 0), -1)
-        
-        # Convert landmark image to base64
-        _, buffer = cv2.imencode('.png', landmark_image)
-        landmark_base64 = base64.b64encode(buffer).decode('utf-8')
+        face_landmarks_list = face_recognition.face_landmarks(img, face_locations)
+        if not face_landmarks_list:
+            print("Failed to get face landmarks")  # Debug log
+            return jsonify({"error": "Failed to extract face landmarks"}), 400
 
-        # Create different features for comparison
-        original_features = features.tolist()
-        # Apply some transformation to create extracted features
-        extracted_features = (np.array(features) * 0.8 + np.random.normal(0, 0.1, size=features.shape)).tolist()
+        # Create a copy of the grayscale image for visualization
+        processed_img = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
 
+        # Draw facial landmarks with triangles
+        for face_landmarks in face_landmarks_list:
+            # Draw chin
+            for i in range(len(face_landmarks['chin']) - 1):
+                pt1 = face_landmarks['chin'][i]
+                pt2 = face_landmarks['chin'][i + 1]
+                cv2.line(processed_img, pt1, pt2, (0, 255, 0), 2)
+                # Draw triangle
+                if i < len(face_landmarks['chin']) - 2:
+                    pt3 = face_landmarks['chin'][i + 2]
+                    cv2.line(processed_img, pt2, pt3, (0, 255, 0), 2)
+                    cv2.line(processed_img, pt3, pt1, (0, 255, 0), 2)
+
+            # Draw other facial features
+            for feature_name, points in face_landmarks.items():
+                if feature_name != 'chin':  # Skip chin as it's already drawn
+                    for i in range(len(points) - 1):
+                        pt1 = points[i]
+                        pt2 = points[i + 1]
+                        cv2.line(processed_img, pt1, pt2, (0, 255, 0), 2)
+                        # Draw triangle
+                        if i < len(points) - 2:
+                            pt3 = points[i + 2]
+                            cv2.line(processed_img, pt2, pt3, (0, 255, 0), 2)
+                            cv2.line(processed_img, pt3, pt1, (0, 255, 0), 2)
+
+        # Convert processed image to base64
+        _, buffer = cv2.imencode('.jpg', processed_img)
+        processed_image_base64 = base64.b64encode(buffer).decode('utf-8')
+
+        # Return the extracted features and processed image
         return jsonify({
-            "original": original_features,
-            "extracted": extracted_features,
-            "landmarks": landmark_base64
+            "status": "success",
+            "extracted": face_encodings[0].tolist(),
+            "processed_image": f"data:image/jpeg;base64,{processed_image_base64}"
         })
+
     except Exception as e:
-        print(f"Error in extract_features_endpoint: {str(e)}")  # Debug log
+        print(f"Feature extraction error: {str(e)}")  # Debug log
+        print(f"Error type: {type(e)}")  # Debug log
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")  # Debug log
         return jsonify({"error": str(e)}), 500
 
 @app.route("/api/face/optimize", methods=["POST"])
@@ -345,27 +376,17 @@ def optimize_features_endpoint():
     try:
         # Verify Firebase token
         token = request.headers.get("Authorization")
-        print(f"Authorization header: {token}")  # Debug log
-        
         if not token:
-            print("No token provided")  # Debug log
             return jsonify({"error": "No token provided"}), 401
         
         decoded_token = verify_firebase_token(token)
-        print(f"Decoded token: {decoded_token}")  # Debug log
-        
         if not decoded_token:
-            print("Invalid token")  # Debug log
             return jsonify({"error": "Invalid token"}), 401
 
         if "image" not in request.files:
-            print("No image in request.files")  # Debug log
             return jsonify({"error": "No image uploaded"}), 400
 
         file = request.files["image"]
-        print(f"Image file received: {file.filename}")  # Debug log
-        
-        # Read the file once and store the data
         image_data = file.read()
         
         # Convert to numpy array
@@ -373,46 +394,90 @@ def optimize_features_endpoint():
         image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         
         if image is None:
-            print("Failed to decode image")  # Debug log
             return jsonify({"error": "Failed to decode image"}), 400
             
-        print(f"Image shape: {image.shape}")  # Debug log
-        
         # Extract features
-        print("Attempting to extract face features...")  # Debug log
-        features = extract_face_features(image_data)
-        if features is None:
-            print("No face detected in image")  # Debug log
+        start_time = time.time()
+        extracted_features = extract_face_features(image_data)
+        extraction_time = (time.time() - start_time) * 1000  # Convert to milliseconds
+        
+        if extracted_features is None:
             return jsonify({"error": "No face detected in image"}), 400
             
-        print(f"Features extracted successfully. Shape: {features.shape}")  # Debug log
-        
-        # Measure original performance
-        start_time = time.time()
-        original_features = features.copy()
-        original_time = (time.time() - start_time) * 1000  # Convert to milliseconds
-        
         # Apply Whale Optimization Algorithm
         start_time = time.time()
-        optimized_features = whale_optimization(features)
-        optimized_time = (time.time() - start_time) * 1000  # Convert to milliseconds
+        optimized_features = whale_optimization(extracted_features)
+        optimization_time = (time.time() - start_time) * 1000  # Convert to milliseconds
 
-        # Calculate accuracy (simplified)
-        original_accuracy = 95  # Example value
-        optimized_accuracy = 98  # Example value
+        # Calculate detailed metrics
+        # 1. Storage Efficiency
+        original_size = extracted_features.nbytes
+        optimized_size = optimized_features.nbytes
+        storage_reduction = ((original_size - optimized_size) / original_size) * 100
+
+        # 2. Feature Distinctiveness
+        original_variance = np.var(extracted_features)
+        optimized_variance = np.var(optimized_features)
+        distinctiveness_improvement = ((optimized_variance - original_variance) / original_variance) * 100
+
+        # 3. Feature Robustness
+        # Add small noise to test robustness
+        noise = np.random.normal(0, 0.1, extracted_features.shape)
+        noisy_original = extracted_features + noise
+        noisy_optimized = optimized_features + noise
+        
+        # Calculate similarity with noisy versions
+        original_robustness = np.dot(extracted_features, noisy_original) / (np.linalg.norm(extracted_features) * np.linalg.norm(noisy_original))
+        optimized_robustness = np.dot(optimized_features, noisy_optimized) / (np.linalg.norm(optimized_features) * np.linalg.norm(noisy_optimized))
+        robustness_improvement = ((optimized_robustness - original_robustness) / original_robustness) * 100
+
+        # 4. Matching Speed
+        # Simulate matching with 1000 random features
+        test_features = np.random.rand(1000, len(extracted_features))
+        start_time = time.time()
+        for feature in test_features:
+            np.dot(extracted_features, feature)
+        original_matching_time = (time.time() - start_time) * 1000
+
+        start_time = time.time()
+        for feature in test_features:
+            np.dot(optimized_features, feature)
+        optimized_matching_time = (time.time() - start_time) * 1000
+        matching_speed_improvement = ((original_matching_time - optimized_matching_time) / original_matching_time) * 100
+
+        # Calculate overall accuracy
+        accuracy = calculate_accuracy(extracted_features, optimized_features)
 
         return jsonify({
-            "original": original_features.tolist(),
+            "extracted": extracted_features.tolist(),
             "optimized": optimized_features.tolist(),
             "performance": {
-                "originalTime": original_time,
-                "optimizedTime": optimized_time,
-                "originalAccuracy": original_accuracy,
-                "optimizedAccuracy": optimized_accuracy
+                "extractionTime": extraction_time,
+                "optimizationTime": optimization_time,
+                "accuracy": accuracy,
+                "storageEfficiency": {
+                    "originalSize": original_size,
+                    "optimizedSize": optimized_size,
+                    "reductionPercentage": storage_reduction
+                },
+                "featureQuality": {
+                    "originalVariance": original_variance,
+                    "optimizedVariance": optimized_variance,
+                    "distinctivenessImprovement": distinctiveness_improvement
+                },
+                "robustness": {
+                    "originalRobustness": original_robustness,
+                    "optimizedRobustness": optimized_robustness,
+                    "improvementPercentage": robustness_improvement
+                },
+                "matchingSpeed": {
+                    "originalMatchingTime": original_matching_time,
+                    "optimizedMatchingTime": optimized_matching_time,
+                    "improvementPercentage": matching_speed_improvement
+                }
             }
         })
     except Exception as e:
-        print(f"Error in optimize_features_endpoint: {str(e)}")  # Debug log
         return jsonify({"error": str(e)}), 500
 
 @app.route("/api/face/match", methods=["POST"])
@@ -577,75 +642,112 @@ def match_face():
 # ==============================
 # Whale Optimization Algorithm (WOA)
 # ==============================
-def whale_optimization(features):
-    """
-    Apply Whale Optimization Algorithm (WOA) to optimize the feature vector.
+def whale_optimization(features, max_iter=50, n_whales=10):
+    # Initialize parameters
+    a = 2  # Initial value of a
+    a_decrease = 2 / max_iter  # Linear decrease of a
     
-    Parameters:
-        features (numpy.ndarray): The input feature vector (1D array).
+    # Initialize whale positions with reduced random variation
+    whales = np.zeros((n_whales, len(features)))
+    for i in range(n_whales):
+        # Start with small random variations around original features
+        whales[i] = features * (1 + np.random.normal(0, 0.05, len(features)))  # Reduced variation
+    
+    best_position = features.copy()
+    best_fitness = float('-inf')
+    
+    # Main optimization loop
+    for iter in range(max_iter):
+        a -= a_decrease  # Decrease a linearly
         
-    Returns:
-        numpy.ndarray: The optimized feature vector.
-    """
-    # Parameters
-    max_iterations = 50  # Maximum number of iterations
-    population_size = 10  # Number of whales (solutions)
-    dim = len(features)  # Dimensionality of the feature vector
-
-    # Initialize whale positions (solutions) randomly
-    population = np.random.uniform(low=-1, high=1, size=(population_size, dim))
-    fitness = np.zeros(population_size)
-
-    # Calculate initial fitness (negative distance to target features)
-    for i in range(population_size):
-        fitness[i] = -np.linalg.norm(population[i] - features)
-
-    # Find the best solution (whale with the highest fitness)
-    best_index = np.argmax(fitness)
-    best_solution = population[best_index]
-
-    # Main WOA loop
-    for t in range(max_iterations):
-        a = 2 - t * (2 / max_iterations)  # Linearly decreases from 2 to 0
-        a2 = -1 + t * (-1 / max_iterations)  # Linearly decreases from -1 to -2
-
-        for i in range(population_size):
-            r1 = np.random.random()  # Random number in [0, 1]
-            r2 = np.random.random()  # Random number in [0, 1]
-            A = 2 * a * r1 - a  # Coefficient A
-            C = 2 * r2  # Coefficient C
-
-            # Parameters for spiral update
-            b = 1  # Constant for defining the shape of the spiral
-            l = (a2 - 1) * np.random.random() + 1  # Random number in [-1, 1]
-
-            # Update whale position
-            if np.random.random() < 0.5:
-                if abs(A) < 1:
-                    # Encircling prey
-                    D = np.abs(C * best_solution - population[i])
-                    population[i] = best_solution - A * D
-                else:
-                    # Search for prey (exploration)
-                    random_whale = population[np.random.randint(0, population_size)]
-                    D = np.abs(C * random_whale - population[i])
-                    population[i] = random_whale - A * D
+        for i in range(n_whales):
+            # Update position
+            r1 = np.random.random()
+            r2 = np.random.random()
+            A = 2 * a * r1 - a
+            C = 2 * r2
+            
+            if abs(A) < 1:
+                # Encircling prey
+                D = abs(C * best_position - whales[i])
+                whales[i] = best_position - A * D
             else:
-                # Spiral updating position
-                D = np.abs(best_solution - population[i])
-                population[i] = D * np.exp(b * l) * np.cos(2 * np.pi * l) + best_solution
+                # Search for prey
+                rand_whale = whales[np.random.randint(0, n_whales)]
+                D = abs(C * rand_whale - whales[i])
+                whales[i] = rand_whale - A * D
+            
+            # Ensure features stay within reasonable bounds
+            whales[i] = np.clip(whales[i], 0, 1)
+            
+            # Calculate fitness
+            fitness = calculate_fitness(features, whales[i])
+            
+            # Update best position
+            if fitness > best_fitness:
+                best_fitness = fitness
+                best_position = whales[i].copy()
+    
+    return best_position
 
-            # Clip values to ensure they stay within bounds
-            population[i] = np.clip(population[i], -1, 1)
+def calculate_fitness(original_features, candidate_features):
+    # Calculate similarity score (cosine similarity)
+    similarity = np.dot(original_features, candidate_features) / (
+        np.linalg.norm(original_features) * np.linalg.norm(candidate_features)
+    )
+    
+    # Calculate feature distinctiveness
+    original_variance = np.var(original_features)
+    candidate_variance = np.var(candidate_features)
+    distinctiveness = min(candidate_variance / original_variance, 2.0)
+    
+    # Calculate dimensionality reduction score
+    reduction = max(0, 1 - len(candidate_features) / len(original_features))
+    
+    # Combined fitness score with adjusted weights
+    fitness = (
+        0.6 * similarity +  # Higher weight on feature preservation
+        0.25 * distinctiveness +  # Moderate weight on distinctiveness
+        0.15 * reduction  # Lower weight on dimensionality reduction
+    )
+    
+    return fitness
 
-            # Update fitness
-            fitness[i] = -np.linalg.norm(population[i] - features)
-
-        # Update the best solution
-        best_index = np.argmax(fitness)
-        best_solution = population[best_index]
-
-    return best_solution  # Return the optimized feature vector
+def calculate_accuracy(original_features, optimized_features):
+    # Calculate similarity score (cosine similarity)
+    similarity = np.dot(original_features, optimized_features) / (
+        np.linalg.norm(original_features) * np.linalg.norm(optimized_features)
+    )
+    
+    # Calculate feature distinctiveness (variance ratio)
+    original_variance = np.var(original_features)
+    optimized_variance = np.var(optimized_features)
+    distinctiveness = min(optimized_variance / original_variance, 2.0)  # Cap at 2x improvement
+    
+    # Calculate dimensionality reduction score
+    original_size = len(original_features)
+    optimized_size = len(optimized_features)
+    reduction_score = 1.0 if optimized_size < original_size else 0.8
+    
+    # Calculate robustness score (how well features handle noise)
+    noise = np.random.normal(0, 0.1, len(original_features))
+    noisy_original = original_features + noise
+    noisy_optimized = optimized_features + noise
+    robustness = np.dot(noisy_original, noisy_optimized) / (
+        np.linalg.norm(noisy_original) * np.linalg.norm(noisy_optimized)
+    )
+    
+    # Weighted accuracy calculation with adjusted weights
+    accuracy = (
+        0.5 * similarity +  # Feature preservation (50%)
+        0.25 * distinctiveness +  # Feature distinctiveness (25%)
+        0.15 * reduction_score +  # Dimensionality reduction (15%)
+        0.1 * robustness  # Feature robustness (10%)
+    )
+    
+    # Convert to percentage and ensure it's between 0 and 100
+    accuracy_percentage = min(max(accuracy * 100, 0), 100)
+    return accuracy_percentage
 
 # ==============================
 # Feature Extraction
@@ -684,7 +786,7 @@ def extract_face_features(image_data):
 # Encryption and Decryption
 # ==============================
 def encrypt_face_features(features):
-    """Encrypt feature array using AES."""
+    """Encrypt feature array using Fernet."""
     try:
         print("Encrypting features...")  # Debug log
         print(f"Input features shape: {features.shape}")  # Debug log
